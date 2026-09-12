@@ -209,6 +209,14 @@ class LitePCIeWishboneSlave(LiteXModule):
         # Get Master port from Crossbar.
         port = endpoint.crossbar.get_master_port()
 
+        # Host Address Translation.
+        # The Wishbone address is an offset inside a window whose base in the Host address space is
+        # set by software. A base of 0 gives the historical 1:1 behaviour.
+        self.base = CSRStorage(len(port.source.adr), description="""Host Address Window Base.\n
+            Base address, in the Host address space, the Wishbone accesses are translated to. The
+            Host address of an access is ``base + wishbone_address``. Reset value of ``0`` maps the
+            window directly onto the low part of the Host address space.""")
+
         # Wishbone Slave FSM.
         self.fsm = fsm = FSM(reset_state="IDLE")
         fsm.act("IDLE",
@@ -225,7 +233,7 @@ class LitePCIeWishboneSlave(LiteXModule):
             port.source.channel.eq(port.channel),
             port.source.first.eq(1),
             port.source.last.eq(1),
-            port.source.adr[ashift:].eq(self.bus.adr),
+            port.source.adr.eq(self.base.storage + Cat(Replicate(0, ashift), self.bus.adr)),
             port.source.req_id.eq(endpoint.phy.id),
             port.source.tag.eq(0),
             port.source.len.eq(1),

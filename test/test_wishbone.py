@@ -298,8 +298,63 @@ class TestWishboneSlave(unittest.TestCase):
         # Verify Write/Read datas match.
         self.assertEqual(wr_datas, rd_datas)
 
+    def translation_test(self, data_width, host_base=0x2000, nwords=8):
+        """Verify the Host address window base is added to the Wishbone address.
+
+        The Host memory is allocated at ``host_base`` only, so an untranslated access (TLP address
+        equal to the raw Wishbone address) lands outside the Host buffer and fails, rather than
+        silently aliasing back into it.
+        """
+        wr_datas = [seed_to_data(i, True) for i in range(nwords)]
+        rd_datas = []
+
+        def main_generator(dut):
+            # Allocate Host's Memory at a non-zero base.
+            dut.host.malloc(host_base, 1024)
+
+            # Enable Chipset.
+            dut.host.chipset.enable()
+
+            # Point the window at the Host buffer.
+            yield dut.slave.base.storage.eq(host_base)
+            yield
+
+            for i in range(nwords):
+                yield from dut.slave.wishbone.write(i, wr_datas[i])
+
+            for i in range(nwords):
+                rd_datas.append((yield from dut.slave.wishbone.read(i)))
+
+        class DUT(LiteXModule):
+            def __init__(self, data_width):
+                self.host     = Host(data_width, root_id, endpoint_id)
+                self.endpoint = LitePCIeEndpoint(self.host.phy)
+                self.slave    = LitePCIeWishboneSlave(self.endpoint)
+
+        dut = DUT(data_width)
+        generators = {
+            "sys" : [
+                main_generator(dut),
+                dut.host.generator(),
+                dut.host.chipset.generator(),
+                dut.host.chipset.phy.phy_sink.generator(),
+                dut.host.chipset.phy.phy_source.generator(),
+            ]
+        }
+        clocks = {"sys": 10}
+        run_simulation(dut, generators, clocks, vcd_name=_vcd_name("sim.vcd"))
+        # The Host buffer only covers [host_base, host_base + 1024): an untranslated access would
+        # index outside it and fail, so a successful round-trip proves the translation is applied.
+        self.assertEqual(wr_datas, rd_datas)
+
     def test_wishbone_32b(self):
         self.wishbone_test(32)
 
     def test_wishbone_64b(self):
         self.wishbone_test(64)
+
+    def test_wishbone_translation_32b(self):
+        self.translation_test(32)
+
+    def test_wishbone_translation_64b(self):
+        self.translation_test(64)
