@@ -84,11 +84,17 @@ class PHYRX128BMarkerDecoder(Module):
 # TX Datapath --------------------------------------------------------------------------------------
 
 class PHYTXDatapath(Module):
-    def __init__(self, core_data_width, pcie_data_width, clock_domain, with_packet_buffer=False):
+    def __init__(self, core_data_width, pcie_data_width, clock_domain, with_packet_buffer=False, cdc_depth=16, with_timing_buffers=False):
         self.sink   = sink   = stream.Endpoint(phy_layout(core_data_width))
         self.source = source = stream.Endpoint(phy_layout(pcie_data_width))
 
         # # #
+
+        if with_timing_buffers:
+            self.submodules.output_buffer = ClockDomainsRenamer("pcie")(
+                stream.Buffer(phy_layout(pcie_data_width), pipe_valid=True, pipe_ready=True))
+            self.comb += self.output_buffer.source.connect(source)
+            source = self.output_buffer.sink
 
         if with_packet_buffer:
             # Continuous input packets can acquire bubbles crossing independent
@@ -111,7 +117,7 @@ class PHYTXDatapath(Module):
                 cd_from         = clock_domain,
                 cd_to           = "pcie",
                 with_common_rst = True,
-                depth           = 16,
+                depth           = cdc_depth,
             )
             converter  = stream.StrideConverter(phy_layout(core_data_width), phy_layout(pcie_data_width))
             converter  = ClockDomainsRenamer("pcie")(converter)
@@ -187,11 +193,23 @@ class PHYRX128BAligner(Module):
 # RX Datapath --------------------------------------------------------------------------------------
 
 class PHYRXDatapath(Module):
-    def __init__(self, core_data_width, pcie_data_width, clock_domain, with_aligner=False):
+    def __init__(self, core_data_width, pcie_data_width, clock_domain, with_aligner=False, cdc_depth=16, with_timing_buffers=False):
         self.sink   = sink   = stream.Endpoint(phy_layout(pcie_data_width))
         self.source = source = stream.Endpoint(phy_layout(core_data_width))
 
         # # #
+
+        if with_timing_buffers:
+            # Register the hard-IP valid/payload before the wide CDC write fanout.
+            self.submodules.input_buffer = ClockDomainsRenamer("pcie")(
+                stream.Buffer(phy_layout(pcie_data_width), pipe_valid=True, pipe_ready=True))
+            self.comb += sink.connect(self.input_buffer.sink)
+            sink = self.input_buffer.source
+            # Isolate downstream ready from the CDC output payload enables.
+            self.submodules.output_buffer = ClockDomainsRenamer(clock_domain)(
+                stream.PipeReady(phy_layout(core_data_width)))
+            self.comb += self.output_buffer.source.connect(source)
+            source = self.output_buffer.sink
 
         if (pcie_data_width == 128) and with_aligner:
             aligner = PHYRX128BAligner()
@@ -212,7 +230,7 @@ class PHYRXDatapath(Module):
                 cd_from         = "pcie",
                 cd_to           = clock_domain,
                 with_common_rst = True,
-                depth           = 16,
+                depth           = cdc_depth,
             )
             pipe_valid = stream.PipeValid(phy_layout(core_data_width))
             pipe_valid = ClockDomainsRenamer(clock_domain)(pipe_valid)
