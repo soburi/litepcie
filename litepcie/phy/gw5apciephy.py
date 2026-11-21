@@ -119,6 +119,7 @@ class GW5APCIEPHY(LiteXModule):
             description="Non-Posted TLP controls the number of credits sent.")
         self._tl_tx_creditscpl = CSRStatus(32,
             description="Completion TLP controls the number of credits sent.")
+        self._perst_n          = CSRStatus(description="Level of the PERST# pin. ``0``: reset asserted.")
 
         self.comb += [
             self._msi_enable.status.eq(1),
@@ -142,6 +143,7 @@ class GW5APCIEPHY(LiteXModule):
         # # #
 
         self.nlanes = nlanes
+        self.reset = Signal()
 
         assert nlanes in [1, 4]
         assert data_width in [64, 128, 256]
@@ -157,8 +159,10 @@ class GW5APCIEPHY(LiteXModule):
         self.cd_pcie = ClockDomain()
         self.comb += [
             self.cd_pcie.clk.eq(ClockSignal("crg_pcie")),
-            self.cd_pcie.rst.eq(~pads.rst_n),
+            self.cd_pcie.rst.eq(~pads.rst_n | self.reset),
         ]
+
+        self.specials += MultiReg(pads.rst_n, self._perst_n.status, "sys")
 
         if hasattr(pads, "wake_n"):
             self.comb += pads.wake_n.eq(0)
