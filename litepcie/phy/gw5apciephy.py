@@ -80,7 +80,7 @@ class GW5APCIEPHY(LiteXModule):
     qword_aligned = False
 
     def __init__(self, platform, pads, nlanes=1, data_width=256, pcie_data_width=256, cd="sys",
-        bar0_size=0x100000,
+        bar0_size=0x100000, with_config=False, ip_path=None,
         cdc_with_bram=True, cdc_depth=16, rx_timing_buffers=False, cdc_pipelined=False):
         # Streams ---------------------------------------------------------------------------------
         self.sink   = stream.Endpoint(phy_layout(data_width))
@@ -126,6 +126,8 @@ class GW5APCIEPHY(LiteXModule):
         ]
 
         # Parameters/Locals ------------------------------------------------------------------------
+        self.ip_path          = os.path.abspath(ip_path) if ip_path else None
+        self.with_config      = with_config
         self.platform         = platform
         self.data_width       = data_width
         self.pcie_data_width  = pcie_data_width
@@ -313,7 +315,7 @@ class GW5APCIEPHY(LiteXModule):
         src_dir = os.path.join(self.platform.output_dir, "gw5apciephy")
         src_zip = os.path.join(self.platform.output_dir, "gw5apciephy.zip")
         url     = "https://github.com/user-attachments/files/18846086/gw5apciephy.zip"
-        if not os.path.exists(src_dir):
+        if self.ip_path is None and not os.path.exists(src_dir):
             # If zip archive is not available
             if not os.path.exists(src_zip):
                 # Download archive.
@@ -342,7 +344,19 @@ class GW5APCIEPHY(LiteXModule):
             except FileNotFoundError:
                 print("The 'unzip' command is not available. Please install unzip and try again.")
 
-        src_dir = os.path.join(src_dir, f"gw5apciephyx{self.nlanes}")
+        src_dir = self.ip_path or os.path.join(src_dir, f"gw5apciephyx{self.nlanes}")
+
+        if self.with_config:
+            from litepcie.phy.gw5apcieconfig import generate
+            gowin_home = os.environ.get("GOWIN_HOME")
+            if gowin_home is None:
+                gw_sh = which("gw_sh")
+                if gw_sh is None:
+                    raise OSError("Set GOWIN_HOME or add gw_sh to PATH to generate PCIe configuration.")
+                gowin_home = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(gw_sh))))
+            csr_path = generate(gowin_home, os.path.join(src_dir, "gw5apciephy.ipc"),
+                os.path.join(self.platform.output_dir, "gw5apciephy.csr"))
+            self.platform.toolchain.additional_tcl_commands.append("set_csr {" + str(csr_path) + "}")
 
         self.platform.add_source(os.path.join(src_dir, "gw5apciephy.v"))
         self.platform.add_source(os.path.join(src_dir, "pcie_controller", "pcie_controller.v"))
