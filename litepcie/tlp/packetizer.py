@@ -685,7 +685,8 @@ class LitePCIeTLPPacketizer(LiteXModule):
                 ).Else(
                     tlp_req.last_be.eq(0x0)
                 ),
-                tlp_req.first_be.eq(0xf),
+                # A master that does not drive the First Byte Enables requests the whole Dword.
+                tlp_req.first_be.eq(Mux(req_sink.first_be != 0, req_sink.first_be, 0xf)),
                 tlp_req.dat.eq(req_sink.dat),
                 If(req_sink.we,
                     tlp_req.be.eq(request_be)

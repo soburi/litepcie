@@ -63,13 +63,22 @@ class Host(LiteXModule):
             data.append(self.buffer[current_adr+i])
         return data
 
+    def write_request(self, msg):
+        data = list(msg.data)
+        if (len(data) == 1) and (msg.first_be != 0xf):
+            # Byte 0 of a Dword, the one of the lowest address, is its most significant byte here.
+            mask = sum(0xff << 8*(3 - n) for n in range(4) if msg.first_be & (1 << n))
+            old  = self.read_mem(msg.address, 4)[0]
+            data = [(old & ~mask) | (data[0] & mask)]
+        self.write_mem(msg.address, data)
+
     def callback(self, msg):
         if isinstance(msg, WR32):
-            self.write_mem(msg.address, msg.data)
+            self.write_request(msg)
         elif isinstance(msg, RD32):
             self.rd_queue.append(msg)
         elif isinstance(msg, WR64):
-            self.write_mem(msg.address, msg.data)
+            self.write_request(msg)
         elif isinstance(msg, RD64):
             self.rd_queue.append(msg)
 
