@@ -10,6 +10,10 @@ from shutil import which
 import subprocess
 
 from migen import *
+from migen.fhdl.simplify import MemoryToArray
+from migen.fhdl.decorators import ModuleTransformer
+from migen.fhdl.specials import WRITE_FIRST
+from migen.genlib.cdc import MultiReg
 
 from litex.gen import *
 
@@ -19,6 +23,56 @@ from litex.soc.interconnect.csr import *
 from litepcie.common import *
 from litepcie.phy.common import *
 
+class GW5AFIFOStorage(ModuleTransformer):
+    """Pipeline shallow FIFO writes and publish their pointer after commit.
+
+    The original pointer reserves space immediately. Its CDC publication is
+    delayed by one write edge to match the registered memory write grants.
+    Each 32-bit bank has a preserved grant register to bound enable fanout.
+    """
+    def transform_fragment(self, module, fragment):
+        for memory in sorted(list(fragment.specials), key=lambda special: special.duid):
+            if not isinstance(memory, Memory):
+                continue
+            writes = [port for port in memory.ports if port.we is not None]
+            reads = [port for port in memory.ports if port.we is None]
+            if not (memory.depth <= 16 and len(writes) == 1 and len(reads) == 1):
+                raise ValueError("FIFO mapping requires a shallow simple dual-port memory")
+            wr, rd = writes[0], reads[0]
+            if wr.we_granularity or memory.init is not None or rd.mode != WRITE_FIRST:
+                raise ValueError("Unsupported FIFO memory mode")
+            publications = [special for special in fragment.specials
+                if isinstance(special, MultiReg) and special.odomain == rd.clock.cd]
+            if len(publications) != 1:
+                raise ValueError("Expected exactly one FIFO write pointer synchronizer")
+            publication = publications[0]
+            committed = Signal.like(publication.i, name="committed_pointer")
+            committed.attr.add("no_retiming")
+            sync = fragment.sync.setdefault(wr.clock.cd, [])
+            sync.append(committed.eq(publication.i))
+            publication.i = committed
+            data = Signal(memory.width, reset_less=True, name="write_data")
+            sync.append(data.eq(wr.dat_w))
+            storage = Array(Signal(memory.width, reset_less=True, name="fifo_word")
+                            for _ in range(memory.depth))
+            for word in range(memory.depth):
+                for low in range(0, memory.width, 32):
+                    high = min(low + 32, memory.width)
+                    grant = Signal(name="write_grant")
+                    grant.attr.update({("syn_preserve", 1), ("syn_keep", 1)})
+                    sync += [grant.eq(wr.we & (wr.adr == word)),
+                             If(grant, storage[word][low:high].eq(data[low:high]))]
+            address = rd.adr
+            if not rd.async_read:
+                address = Signal.like(rd.adr)
+                statement = address.eq(rd.adr)
+                if rd.re is not None:
+                    statement = If(rd.re, statement)
+                fragment.sync.setdefault(rd.clock.cd, []).append(statement)
+            fragment.comb.append(rd.dat_r.eq(storage[address]))
+            fragment.specials.difference_update([memory, *memory.ports])
+
+
 # GW5APCIEPHY --------------------------------------------------------------------------------------
 
 class GW5APCIEPHY(LiteXModule):
@@ -26,7 +80,8 @@ class GW5APCIEPHY(LiteXModule):
     qword_aligned = False
 
     def __init__(self, platform, pads, nlanes=1, data_width=256, pcie_data_width=256, cd="sys",
-        bar0_size=0x100000):
+        bar0_size=0x100000,
+        cdc_with_bram=True, cdc_depth=16, rx_timing_buffers=False, cdc_pipelined=False):
         # Streams ---------------------------------------------------------------------------------
         self.sink   = stream.Endpoint(phy_layout(data_width))
         self.source = stream.Endpoint(phy_layout(data_width))
@@ -111,10 +166,16 @@ class GW5APCIEPHY(LiteXModule):
         tl_tx_data       = Signal(pcie_data_width)
         tl_tx_valid      = Signal(8)
 
-        self.tx_datapath = PHYTXDatapath(
+        tx_datapath = PHYTXDatapath(
             core_data_width = data_width,
             pcie_data_width = pcie_data_width,
-            clock_domain    = cd)
+            clock_domain    = cd,
+            cdc_depth       = cdc_depth,
+            with_timing_buffers = cdc_pipelined)
+        # The shallow CDC storage can use registers when BSRAM pulse-width
+        # requirements are more restrictive than the fabric timing limits.
+        self.tx_datapath = GW5AFIFOStorage()(tx_datapath) if cdc_pipelined else (
+            tx_datapath if cdc_with_bram else MemoryToArray()(tx_datapath))
         s_axis_tx = self.tx_datapath.source
         self.comb += [
             self.sink.connect(self.tx_datapath.sink),
@@ -129,10 +190,14 @@ class GW5APCIEPHY(LiteXModule):
         tl_rx_data       = Signal(pcie_data_width)
         tl_rx_valid      = Signal(8)
 
-        self.rx_datapath = PHYRXDatapath(
+        rx_datapath = PHYRXDatapath(
             core_data_width = data_width,
             pcie_data_width = pcie_data_width,
-            clock_domain    = cd)
+            clock_domain    = cd,
+            cdc_depth       = cdc_depth,
+            with_timing_buffers = rx_timing_buffers)
+        self.rx_datapath = GW5AFIFOStorage()(rx_datapath) if cdc_pipelined else (
+            rx_datapath if cdc_with_bram else MemoryToArray()(rx_datapath))
         m_axis_rx = self.rx_datapath.sink
         self.comb += [
             self.rx_datapath.source.connect(self.source),
